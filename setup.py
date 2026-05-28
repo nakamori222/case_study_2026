@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'IntervalModeChanger = ros_start.IntervalModeChanger:main',
             'DriveModeController = ros_start.DriveModeController:main',
+            'OdometrySobitLight = ros_start.OdometrySobitLight:main',
         ],
     },
 )
