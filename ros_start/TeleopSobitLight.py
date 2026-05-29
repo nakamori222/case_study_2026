@@ -2,7 +2,6 @@ import sys
 import termios
 import tty
 import rclpy                                # ROS 2 Pythonクライアントライブラリ
-from sobits_interfaces.srv import ModeCtrl
 from rclpy.node import Node                 # ノードクラスをインポート
 from geometry_msgs.msg import Twist         # Twistメッセージをインポート
 from std_msgs.msg import String
@@ -22,27 +21,15 @@ class TeleopSobitLight(Node):
         # ターミナル設定の保存 (get_keyで必要)
         self.settings = termios.tcgetattr(sys.stdin)
         
-        # 速度の初期値を設定 (コールバックで使用するため)
-        self.velocity = 0
-        self.yaw_velocity = 0
+        # 速度の初期値を設定
+        self.velocity = 0.0 #しっかりfloat型で定義すること
+        self.yaw_velocity = 0.0
 
         # パブリッシャーの作成
         self.publisher = self.create_publisher(Twist, '/sobit_light/manual_control/cmd_vel', 10) 
         self.telepublisher_ = self.create_publisher(String, 'keyboard_input', 10)
-                        
-        # 'mode_ctrl'という名前でModeCtrlサービスを作成し、コールバック関数を設定
-        self.srv = self.create_service(ModeCtrl, 'mode_ctrl', self.mode_ctrl_callback)
         
         self.get_logger().info('キーボード入力待ちノードが起動しました。Qで終了します。')
-
-    
-    def mode_ctrl_callback(self, request, response):  
-       msg = Twist()                   # Twist型メッセージのインスタンスを作成   
-       response.response = True
-       msg.linear.x = self.velocity          # メッセージの線形速度を設定
-       self.publisher.publish(msg)  # メッセージをパブリッシュ                     
-       # レスポンスを返す
-       return response
 
     def run(self):
         msg = String()
@@ -56,30 +43,32 @@ class TeleopSobitLight(Node):
                     if self.velocity < 2.0:
                         self.velocity += 0.05
 
-                        msg_twist.linear.x = self.velocity 
                 if key == "k":
-                    if self.velocity < 2.0:
+                    if self.velocity > -2.0:
                         self.velocity -= 0.05
-
-                        msg_twist.linear.x = self.velocity 
                 
                 if key == "j":
                     if self.yaw_velocity < 1.0:
                         self.yaw_velocity += 0.02
 
-                        msg_twist.angular.z = self.yaw_velocity 
-
                 if key == "l":
-                    if self.yaw_velocity < 1.0:
+                    if self.yaw_velocity > -1.0:
                         self.yaw_velocity -= 0.02
-
-                        msg_twist.angular.z = self.yaw_velocity
-
+             
+                if key == "s": #強制ストップ
+                    self.velocity = 0.0
+                    self.yaw_velocity = 0.0
+                     
+                msg_twist.linear.x = self.velocity
+                msg_twist.angular.z = self.yaw_velocity
                 self.publisher.publish(msg_twist) #速度を発行
 
-                if key == "p":
+                if key == "p": #速度確認
                     self.get_logger().info(f'velocity = {self.velocity}')
                     self.get_logger().info(f'yaw_velocity = {self.yaw_velocity}')
+                
+                 
+                
 
                 # 押されたキーをログに表示
                 self.get_logger().info(f'Pressed: {key}')
