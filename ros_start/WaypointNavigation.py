@@ -1,82 +1,136 @@
+#角度を合わせて直進し、目的地に行くプログラム
+#P制御のような、角度を修正する機能などはない
+#自己位置推定はオドメトリのみを用いた
+
 import rclpy                                # ROS 2 Pythonクライアントライブラリ
 from rclpy.node import Node                 # ノードクラスをインポート
 from sobits_interfaces.srv import ModeCtrl  # ModeCtrlサービスインターフェースをインポート
 from geometry_msgs.msg import Twist         # Twistメッセージをインポート
 from nav_msgs.msg import Odometry
-from tf_transformations import euler_from_quaternion #クォータニオンからロールピッチヨーを求める。
-
-
-
-def quaternion_to_yaw(quaternion):
-    q = quaternion
-    quaternion_list = [q.x, q.y, q.z, q.w]
-    roll, pitch, yaw = euler_from_quaternion(quaternion_list)
-    
-    return yaw
-
-
-
+from math import sqrt, atan2, pi
 
 
 # WaypointNavigationクラスを定義し、Nodeクラスを継承
 class WaypointNavigation(Node):
-   def __init__(self):
-       # 親クラスのコンストラクタを呼び出し、ノード名を'way_point_navigation'に設定
-       super().__init__('way_point_navigation')
-       # '/sobit_light/manual_control/cmd_vel'という名前のトピックにTwist型メッセージをパブリッシュするパブリッシャーを作成
-       self.publisher = self.create_publisher(Twist,                                           
+    def __init__(self):
+        # 親クラスのコンストラクタを呼び出し、ノード名を'way_point_navigation'に設定
+        super().__init__('way_point_navigation')
+        # '/sobit_light/manual_control/cmd_vel'という名前のトピックにTwist型メッセージをパブリッシュするパブリッシャーを作成
+        self.publisher = self.create_publisher(Twist,                                           
                         '/sobit_light/manual_control/cmd_vel', 
                         10) 
 
-       self.subscription = self.create_subscription(
+        self.subscription = self.create_subscription(
             Odometry,
             '/sobit_light/odometry/odometry',
             self.odom_callback,
             10) #サブスクライバーを追加した 4/30
 
-       self.x = None
-       self.y = None
-       self.angle = None
-       self.is_stopped = False
-       self.velocity = 0.0
-       
-       self.waypoint_flag = 0
-       self.waypoint = [[1.0, 0], [1.0, 1.0], [2.0, 2.0], [0.0, 0.0]]
+        self.frequency = 60.0
+        timer_period = 1.0 / self.frequency  # 0.2秒ごとに実行
+        self.timer = self.create_timer(timer_period, self.navigate_control)
 
-       # 'mode_ctrl'という名前でModeCtrlサービスを作成し、コールバック関数を設定
-       self.srv = self.create_service(ModeCtrl, 'mode_ctrl', self.mode_ctrl_callback)
-       # サービスが利用可能になるまで待機
-       self.get_logger().info('Waiting for service...')
+        self.x = 0.0
+        self.y = 0.0
+        self.yaw = 0.0
+        self.velocity = 0.0
+        self.yaw_velocity = 0.0
+
+        self.arrival_flag = False
+        self.angleset_flag = False
+        self.point_idx = 0
+        self.waypoint = [[1, 1], [1, 0], [0, 0]]
+        self.stop_count = 0
 
 
-   # サービスリクエストを処理するコールバック関数
-   def mode_ctrl_callback(self, request, response):  
-       msg = Twist()                   # Twist型メッセージのインスタンスを作成   
-       response.response = True
-       msg.linear.x = self.velocity          # メッセージの線形速度を設定
-       self.publisher.publish(msg)  # メッセージをパブリッシュ                     
-       # レスポンスを返す
-       return response
 
-   def odom_callback(self, msg):
-       self.x = msg.pose.pose.position.x
-       self.y = msg.pose.pose.position.y
-       self.angle = quaternion_to_yaw(msg.pose.pose.orientation)
-       self.get_logger().info(f"angle = {self.angle}")
+        # サービスが利用可能になるまで待機
+        self.get_logger().info('Waiting for service...')
 
-       if self.x <= 0.92: 
-          if self.velocity < 0.2:
-              self.velocity += 0.005
-       else:
-          if self.velocity > 0:
-              self.velocity -= 0.005
+    def odom_callback(self, msg):
+        self.x = msg.pose.pose.position.x
+        self.y = msg.pose.pose.position.y
+        q = msg.pose.pose.orientation
+        
+        # クォータニオンからヨー角（z軸まわりの回転角度 = ロボットの向き）への変換式
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        
+        # self.angular にラジアン単位（-pi ～ +pi）で現在の角度を代入
+        self.yaw = atan2(siny_cosp, cosy_cosp)
 
-       cmd_msg = Twist()
-       cmd_msg.angular.z = self.velocity
+        #self.get_logger().info(f"x = {self.x}")
+        #self.get_logger().info(f"yaw = {self.yaw}")
 
-       #cmd_msg.angular.z ヨーに値を足すと左回転する。ロール ピッチ の方向に値を発行しても意味はない
-       #cmd_mag.linear.x 足すとまっすぐ動く。二輪のタイヤで真横に動けず、頭足の方にも動けないのでx以外に値を発行しても意味がない
-       self.publisher.publish(cmd_msg)
+    def navigate_control(self):
+        if self.point_idx < len(self.waypoint):        
+            if self.angleset_flag == False: #角度を合わせる
+                self.navigate_angular() 
+            else:
+                if self.stop_count < 180: #3秒待機
+                        self.stop_count += 1
+                        self.get_logger().info(f"待ってるよー{self.stop_count}")
+                else:
+                    if self.arrival_flag == False: #直進する
+                        self.navigate_linear()
+                    else:
+                        if self.stop_count < 180: #3秒待機
+                            self.stop_count += 1
+                            #self.get_logger().info(f"待ってるよー{self.stop_count}")
+                        
+                        else:
+                            self.stop_count = 0
+                            self.point_idx += 1
+                            self.arrival_flag = False
+                            self.angleset_flag = False
+                            self.get_logger().info(f"動きます")
+        else:
+            self.get_logger().info(f"どこ行くの？")
+
+
+    def navigate_linear(self):
+        point = self.waypoint[self.point_idx]
+        dist = sqrt((point[0]-self.x) ** 2 + (point[1]-self.y) ** 2)
+        self.get_logger().info(f"dist = {dist}")
+
+        if dist > 0.08: 
+            if self.velocity < 0.2:
+                self.velocity += (0.2 / self.frequency) #周波数で割って急激に速度が変化しないようにした
+        else:
+            if self.velocity > 0:
+                self.velocity -= (0.2 / self.frequency)
+        
+        if dist < 0.05 : #到着処理
+            self.arrival_flag = True
+            self.velocity = 0.0
+            self.stop_count = 0
+
+        cmd_msg = Twist()
+        cmd_msg.linear.x = self.velocity
+        self.publisher.publish(cmd_msg)
+
+    def navigate_angular(self):
+        point = self.waypoint[self.point_idx]
+        angle = (atan2(point[1] - self.y, point[0] - self.x)) - self.yaw
+
+        if abs(angle) > pi/12:
+            if self.yaw_velocity < 0.3:
+                self.yaw_velocity += (0.2 / self.frequency)
+        else:
+            if self.yaw_velocity > 0.02:
+                self.yaw_velocity -= (0.05 /self.frequency)
+
+        
+        if abs(angle) < pi / 180:
+            self.angleset_flag = True
+            self.yaw_velocity = 0.0
+            self.stop_count = 0
+
+        cmd_msg = Twist()
+        cmd_msg.angular.z = self.yaw_velocity
+        self.publisher.publish(cmd_msg)
+
+
           
  
 
